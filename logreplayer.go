@@ -1,13 +1,14 @@
 package main
 
 import (
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	"gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
 )
 
 type logReplayer struct {
@@ -59,6 +60,8 @@ func (l *logReplayer) playLog() (err error) {
 		total         int = 0
 	)
 
+	logger.Debug(*oplog_name)
+
 	signal.Notify(chsig, os.Interrupt, syscall.SIGTERM)
 
 	// this runner will pull the incoming ops off the channel and apply them
@@ -76,7 +79,7 @@ func (l *logReplayer) playLog() (err error) {
 
 	// set up initial query to the oplog
 	logger.Info("Replaying oplog from %s to %s", l.from, l.to)
-	iter := sourceOplog.Find(bson.M{"ts": bson.M{"$gt": bson.MongoTimestamp(l.from)}}).LogReplay().Sort("$natural").Tail(1 * time.Second)
+	iter := sourceOplog.Find(bson.M{"ts": bson.M{"$gt": bson.MongoTimestamp(l.from)}}).LogReplay().Sort("$natural").Tail(5 * time.Second)
 
 	// loop over the oplog
 outer:
@@ -121,7 +124,8 @@ outer:
 			}
 
 			// match our namespace, or skip this op
-			if *allDbs || strings.HasPrefix(currentOp.Ns, l.srcDB) {
+			if (*singleCollection != "" && strings.HasSuffix(currentOp.Ns, "."+*singleCollection)) && (*allDbs || strings.HasPrefix(currentOp.Ns, l.srcDB)) {
+				logger.Finest("<--- DOING op done on %s", currentOp.Ns)
 
 				currentOp.Ns = strings.Replace(currentOp.Ns, l.srcDB, l.dstDB, 1)
 				if currentOp.Kind() == COMMAND || (currentOp.isSystemCollection() && currentOp.Kind() == INSERT) {
@@ -130,6 +134,8 @@ outer:
 						currentOp.O["ns"] = strings.Replace(ns.(string), l.srcDB, l.dstDB, 1)
 					}
 				}
+
+				// Kei5muavooPhua5mee0ithi0eWiethe5
 
 				count++
 				total++
@@ -143,7 +149,7 @@ outer:
 				}
 				currentOp = OplogDoc{}
 			} else {
-				logger.Finest("skipping op %s", currentOp.String())
+				logger.Finest("-xx- skipping op done on %s", currentOp.Ns)
 			}
 		}
 		// check to see if we're expired, i.e. if now is > our specified end point
@@ -157,6 +163,11 @@ outer:
 		if quitting(chsig) {
 			logger.Info("Recieved Sigint, quitting")
 			break outer
+		}
+
+		if err := iter.Err(); err != nil {
+			logger.Debug("Iter error!")
+			logger.Debug(err.Error())
 		}
 
 		if iter.Timeout() {
@@ -175,7 +186,7 @@ outer:
 			logger.Critical("too many errors reading from oplog, bailing.")
 			os.Exit(1)
 		}
-		iter = sourceOplog.Find(bson.M{"ts": bson.M{"$gt": lastTimestamp}}).LogReplay().Sort("$natural").Tail(1 * time.Second)
+		iter = sourceOplog.Find(bson.M{"ts": bson.M{"$gt": lastTimestamp}}).LogReplay().Sort("$natural").Tail(5 * time.Second)
 	}
 
 	for count > 0 {

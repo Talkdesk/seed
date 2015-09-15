@@ -1,27 +1,30 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
-	"gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"net"
 	"net/url"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"net"
-	"crypto/tls"
+
+	"gopkg.in/mgo.v2"
+	"gopkg.in/mgo.v2/bson"
 )
 
 type MongoTarget struct {
-	dst	*mgo.Session
+	dst    *mgo.Session
 	dstURI *url.URL
 	dstDB  string
 
-	src	*mgo.Session
+	src    *mgo.Session
 	srcURI *url.URL
 	srcDB  string
+
+	singleCollection string
 
 	result ApplyOpResult
 }
@@ -33,17 +36,19 @@ func NewMongoTarget(uri *url.URL, dstDB string) *MongoTarget {
 
 // Dial connect to mongo, and return an error if there's a problem
 func (t *MongoTarget) Dial() error {
+	logger.Info("Dial()")
+
 	username := t.dstURI.User.Username()
 	password, _ := t.dstURI.User.Password()
 	parsedQuery, _ := url.ParseQuery(t.dstURI.RawQuery)
 	servers := strings.Split(t.dstURI.Host, ",")
 
 	dialInfo := &mgo.DialInfo{
-		Addrs: servers,
+		Addrs:    servers,
 		Database: t.dstDB,
 		Username: username,
 		Password: password,
-		Timeout: time.Second * time.Duration(*connectionTimeout),
+		Timeout:  time.Second * time.Duration(*connectionTimeout),
 	}
 	if replicaSet, hasReplicaSet := parsedQuery["replicaSet"]; hasReplicaSet {
 		dialInfo.ReplicaSetName = replicaSet[0]
@@ -160,7 +165,7 @@ type CollectionSyncTracker struct {
 	Err  error
 }
 
-func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string) (err error) {
+func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string, collection string) (err error) {
 	t.src = src
 	t.srcURI = srcURI
 	t.srcDB = srcDB
@@ -169,13 +174,22 @@ func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string) (err
 	t.dst.SetBatch(1000)
 	t.dst.SetPrefetch(0.5)
 
-	names, err := src.DB(t.srcDB).CollectionNames()
-	if err != nil {
-		return err
+	var names []string
+
+	if collection != "" {
+		names = []string{collection}
+	} else {
+		names, err = src.DB(t.srcDB).CollectionNames()
+		if err != nil {
+			return err
+		}
 	}
 
 	// delete the destination collections
 	for _, v := range names {
+		logger.Info(v)
+		logger.Info("DEBUG DEBUG DEBUG")
+
 		if strings.HasPrefix(v, "system.") {
 			continue
 		}
@@ -300,10 +314,10 @@ func (t *MongoTarget) SyncCollection(collection string) (err error) {
 
 	// set up goroutines and channels to handle the inserts
 	var (
-		quit	   = make(chan bool)
-		chdone	 = make(chan int, 1)
-		cierr	  = make(chan error)
-		wg		 = new(sync.WaitGroup)
+		quit       = make(chan bool)
+		chdone     = make(chan int, 1)
+		cierr      = make(chan error)
+		wg         = new(sync.WaitGroup)
 		opChannels = newOpChannels()
 	)
 
@@ -315,8 +329,8 @@ func (t *MongoTarget) SyncCollection(collection string) (err error) {
 	go t.collectionIterator(t.src.Clone(), collection, count, opChannels, chdone, quit, cierr, wg)
 
 	var (
-		got	  = 0
-		total	= 0
+		got      = 0
+		total    = 0
 		finished = false
 	)
 
@@ -357,10 +371,10 @@ func (t *MongoTarget) collectionIterator(sess *mgo.Session, collection string, c
 	defer wg.Done()
 
 	var (
-		buffer	 = make([]interface{}, 0, BUFFER_SIZE)
-		doc		= bson.M{}
-		idx		= 0
-		sent	   = 0
+		buffer     = make([]interface{}, 0, BUFFER_SIZE)
+		doc        = bson.M{}
+		idx        = 0
+		sent       = 0
 		currentId  interface{} //bson.ObjectId
 		bufferSize = 0
 	)
@@ -530,6 +544,10 @@ func (t *MongoTarget) SyncIndexes(unique bool) error {
 			continue
 		}
 
+		if !strings.HasSuffix(ns, "."+*singleCollection) {
+			continue
+		}
+
 		if *forceIndexBuild == "fg" || *forceIndexBuild == "bg" {
 			_, ok := doc["background"]
 			if ok {
@@ -556,19 +574,22 @@ func (t *MongoTarget) SyncIndexes(unique bool) error {
 
 // SyncUsers copies the indexes from the source to the destination
 func (t *MongoTarget) SyncUsers() error {
-	logger.Info("Adding users")
-	count := 0
-	doc := bson.M{}
-	iter := t.src.DB(t.srcDB).C("system.users").Find(bson.M{}).Iter()
-	for iter.Next(&doc) {
-		logger.Finest("adding user: %+v", doc)
-		c, _ := t.dst.DB(t.dstDB).C("system.users").Find(doc).Count()
-		if c == 0 {
-			t.dst.DB(t.dstDB).C("system.users").Insert(doc)
-			count++
+	if *singleCollection == "" {
+		logger.Info("Adding users")
+		count := 0
+		doc := bson.M{}
+		iter := t.src.DB(t.srcDB).C("system.users").Find(bson.M{}).Iter()
+		for iter.Next(&doc) {
+			logger.Finest("adding user: %+v", doc)
+			c, _ := t.dst.DB(t.dstDB).C("system.users").Find(doc).Count()
+			if c == 0 {
+				t.dst.DB(t.dstDB).C("system.users").Insert(doc)
+				count++
+			}
 		}
+		logger.Debug("%d Users added", count)
 	}
-	logger.Debug("%d Users added", count)
+
 	return nil
 }
 

@@ -1,8 +1,9 @@
 package main
 
 import (
-	"gopkg.in/mgo.v2"
 	"net/url"
+
+	"gopkg.in/mgo.v2"
 )
 
 type BlackHoleTarget string
@@ -29,7 +30,7 @@ func (b BlackHoleTarget) ApplyOne(buf OplogDoc) error {
 	return nil
 }
 
-func (b BlackHoleTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string) error {
+func (b BlackHoleTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string, singleCollection string) error {
 	logger.Debug("Performing initial black hole sync, but nothing to do")
 	return nil
 }

@@ -1,13 +1,14 @@
 package main
 
 import (
-	"gopkg.in/mgo.v2"
 	"net/url"
 	"strings"
+
+	"gopkg.in/mgo.v2"
 )
 
 type Target interface {
-	Sync(src *mgo.Session, srcURI *url.URL, srcDB string) error
+	Sync(src *mgo.Session, srcURI *url.URL, srcDB string, singleCollection string) error
 	ApplyOne(op OplogDoc) error
 	KeepAlive() error
 	Dial() error

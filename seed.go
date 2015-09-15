@@ -1,16 +1,17 @@
 package main
 
 import (
-	"code.google.com/p/log4go"
 	"errors"
 	"flag"
 	"fmt"
-	"gopkg.in/mgo.v2"
 	"net/url"
 	"os"
 	"runtime"
 	"strings"
 	"time"
+
+	"code.google.com/p/log4go"
+	"gopkg.in/mgo.v2"
 )
 
 var (
@@ -40,6 +41,7 @@ var (
 	allDbs            = flag.Bool("allDbs", false, "copy all the databases from the source to the destination")
 	ignoreSslError    = flag.Bool("ignoreSslError", false, "ignore validation of SSL certificate")
 	connectionTimeout = flag.Int("connectionTimeout", 60, "connection timeout in seconds")
+	singleCollection  = flag.String("collection", "", "force sync of a single collection")
 )
 
 var logger log4go.Logger
@@ -83,9 +85,7 @@ func main() {
 		Quit(1, err)
 	}
 
-	srcTarget := NewMongoTarget(srcURI, srcDB)
-	err = srcTarget.Dial()
-	source := srcTarget.dst
+	source, err := mgo.Dial(srcURI.String())
 	if err != nil {
 		logger.Critical("Cannot dial %s\n, %v", srcURI.String(), err)
 		Quit(1, err)
@@ -140,14 +140,14 @@ func main() {
 				logger.Info("Copying db " + d)
 				target.DB(d)
 
-				if err := target.Sync(source, srcURI, d); err != nil {
+				if err := target.Sync(source, srcURI, d, ""); err != nil {
 					Quit(1, err)
 				}
 			}
 
 		} else {
 			// copying one database
-			if err := target.Sync(source, srcURI, srcDB); err != nil {
+			if err := target.Sync(source, srcURI, srcDB, *singleCollection); err != nil {
 				Quit(1, err)
 			}
 		}
