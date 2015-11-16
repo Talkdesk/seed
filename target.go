@@ -8,7 +8,7 @@ import (
 )
 
 type Target interface {
-	Sync(src *mgo.Session, srcURI *url.URL, srcDB string, singleCollection string) error
+	Sync(src *mgo.Session, srcURI *url.URL, srcDB string) error
 	ApplyOne(op OplogDoc) error
 	KeepAlive() error
 	Dial() error

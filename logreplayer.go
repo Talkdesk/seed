@@ -60,6 +60,12 @@ func (l *logReplayer) playLog() (err error) {
 		total         int = 0
 	)
 
+	collections_map := make(map[string]bool)
+
+	for _, v := range collections {
+		collections_map[v] = true
+	}
+
 	logger.Debug(*oplog_name)
 
 	signal.Notify(chsig, os.Interrupt, syscall.SIGTERM)
@@ -124,7 +130,13 @@ outer:
 			}
 
 			// match our namespace, or skip this op
-			if (*singleCollection != "" && strings.HasSuffix(currentOp.Ns, "."+*singleCollection)) && (*allDbs || strings.HasPrefix(currentOp.Ns, l.srcDB)) {
+			if *allDbs || strings.HasPrefix(currentOp.Ns, l.srcDB) {
+
+				if len(collections) > 0 && !collections_map[currentOp.Collection()] {
+					logger.Finest("-xx- SKIPPING op done on %s", currentOp.Ns)
+					continue
+				}
+
 				logger.Finest("<--- DOING op done on %s", currentOp.Ns)
 
 				currentOp.Ns = strings.Replace(currentOp.Ns, l.srcDB, l.dstDB, 1)
@@ -134,8 +146,6 @@ outer:
 						currentOp.O["ns"] = strings.Replace(ns.(string), l.srcDB, l.dstDB, 1)
 					}
 				}
-
-				// Kei5muavooPhua5mee0ithi0eWiethe5
 
 				count++
 				total++
@@ -148,8 +158,6 @@ outer:
 					break outer
 				}
 				currentOp = OplogDoc{}
-			} else {
-				logger.Finest("-xx- skipping op done on %s", currentOp.Ns)
 			}
 		}
 		// check to see if we're expired, i.e. if now is > our specified end point

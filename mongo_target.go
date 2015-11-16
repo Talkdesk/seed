@@ -13,6 +13,8 @@ import (
 
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
+
+	set "github.com/deckarep/golang-set"
 )
 
 type MongoTarget struct {
@@ -23,8 +25,6 @@ type MongoTarget struct {
 	src    *mgo.Session
 	srcURI *url.URL
 	srcDB  string
-
-	singleCollection string
 
 	result ApplyOpResult
 }
@@ -165,31 +165,58 @@ type CollectionSyncTracker struct {
 	Err  error
 }
 
-func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string, collection string) (err error) {
+func FindNames(db_collections []string, provided_collections []string) ([]string, error) {
+	if len(provided_collections) < 1 {
+		return db_collections, nil
+	} else {
+		db_collections_i := make([]interface{}, len(db_collections))
+		provided_collections_i := make([]interface{}, len(provided_collections))
+
+		for i, v := range db_collections {
+			db_collections_i[i] = v
+		}
+
+		for i, v := range provided_collections {
+			provided_collections_i[i] = v
+		}
+
+		db_set := set.NewSetFromSlice(db_collections_i)
+		provided_set := set.NewSetFromSlice(provided_collections_i)
+		result_set := db_set.Intersect(provided_set)
+
+		result_collection := make([]string, len(result_set.ToSlice()))
+
+		for i, v := range result_set.ToSlice() {
+			result_collection[i] = v.(string)
+		}
+
+		return result_collection, nil
+	}
+}
+
+func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string) (err error) {
 	t.src = src
 	t.srcURI = srcURI
 	t.srcDB = srcDB
 
 	t.dst.EnsureSafe(&mgo.Safe{})
-	t.dst.SetBatch(1000)
-	t.dst.SetPrefetch(0.5)
+	t.dst.SetBatch(*batchSize)
+	t.dst.SetPrefetch(*prefetch)
 
-	var names []string
+	db_collections, err := src.DB(t.srcDB).CollectionNames()
 
-	if collection != "" {
-		names = []string{collection}
-	} else {
-		names, err = src.DB(t.srcDB).CollectionNames()
-		if err != nil {
-			return err
-		}
+	if err != nil {
+		return err
+	}
+
+	names, err := FindNames(db_collections, collections)
+
+	if err != nil {
+		return err
 	}
 
 	// delete the destination collections
 	for _, v := range names {
-		logger.Info(v)
-		logger.Info("DEBUG DEBUG DEBUG")
-
 		if strings.HasPrefix(v, "system.") {
 			continue
 		}
@@ -229,24 +256,27 @@ func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string, coll
 				return fmt.Errorf("Can't shard collection %s - %v", v, err)
 			}
 		}
-	}
 
-	// sync the indexes with unique indexes
-	err = t.SyncIndexes(true)
-	if err != nil {
-		return err
-	}
-	if *forceIndexBuild == "im" {
-		err = t.SyncIndexes(false)
+		// sync the indexes with unique indexes
+		err = t.SyncIndexes(true, v)
 		if err != nil {
 			return err
+		}
+		if *forceIndexBuild == "im" {
+			err = t.SyncIndexes(false, v)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	t.src.Refresh()
-	err = t.SyncUsers()
-	if err != nil {
-		return err
+
+	if *syncUsers {
+		err = t.SyncUsers()
+		if err != nil {
+			return err
+		}
 	}
 
 	chcol := make(chan CollectionSyncTracker)
@@ -277,10 +307,12 @@ func (t *MongoTarget) Sync(src *mgo.Session, srcURI *url.URL, srcDB string, coll
 		}
 	}
 
-	if *forceIndexBuild != "im" {
-		err = t.SyncIndexes(false)
-		if err != nil {
-			return err
+	for _, v := range names {
+		if *forceIndexBuild != "im" {
+			err = t.SyncIndexes(false, v)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -519,13 +551,15 @@ func writeBuffer(db *mgo.Database, opChannels *OpChannels) {
 }
 
 // SyncIndexes copies the indexes from the source to the destination
-func (t *MongoTarget) SyncIndexes(unique bool) error {
+func (t *MongoTarget) SyncIndexes(unique bool, collection string) error {
 	if unique {
 		logger.Info("Adding unique indexes")
 	} else {
 		logger.Info("Adding non-unique indexes")
 	}
+
 	var query bson.M
+
 	if unique {
 		query = bson.M{"unique": true}
 	} else {
@@ -544,7 +578,7 @@ func (t *MongoTarget) SyncIndexes(unique bool) error {
 			continue
 		}
 
-		if !strings.HasSuffix(ns, "."+*singleCollection) {
+		if collection != "" && !strings.HasSuffix(ns, "."+collection) {
 			continue
 		}
 
@@ -574,21 +608,19 @@ func (t *MongoTarget) SyncIndexes(unique bool) error {
 
 // SyncUsers copies the indexes from the source to the destination
 func (t *MongoTarget) SyncUsers() error {
-	if *singleCollection == "" {
-		logger.Info("Adding users")
-		count := 0
-		doc := bson.M{}
-		iter := t.src.DB(t.srcDB).C("system.users").Find(bson.M{}).Iter()
-		for iter.Next(&doc) {
-			logger.Finest("adding user: %+v", doc)
-			c, _ := t.dst.DB(t.dstDB).C("system.users").Find(doc).Count()
-			if c == 0 {
-				t.dst.DB(t.dstDB).C("system.users").Insert(doc)
-				count++
-			}
+	logger.Info("Adding users")
+	count := 0
+	doc := bson.M{}
+	iter := t.src.DB(t.srcDB).C("system.users").Find(bson.M{}).Iter()
+	for iter.Next(&doc) {
+		logger.Finest("adding user: %+v", doc)
+		c, _ := t.dst.DB(t.dstDB).C("system.users").Find(doc).Count()
+		if c == 0 {
+			t.dst.DB(t.dstDB).C("system.users").Insert(doc)
+			count++
 		}
-		logger.Debug("%d Users added", count)
 	}
+	logger.Debug("%d Users added", count)
 
 	return nil
 }

@@ -14,6 +14,19 @@ import (
 	"gopkg.in/mgo.v2"
 )
 
+type collection_slice []string
+
+func (c *collection_slice) String() string {
+	return fmt.Sprintf("%s", *c)
+}
+
+func (c *collection_slice) Set(value string) error {
+	*c = append(*c, value)
+	return nil
+}
+
+var collections collection_slice
+
 var (
 	logdebug  = flag.Bool("v", false, "debug")
 	logfinest = flag.Bool("vv", false, "super debug")
@@ -41,7 +54,9 @@ var (
 	allDbs            = flag.Bool("allDbs", false, "copy all the databases from the source to the destination")
 	ignoreSslError    = flag.Bool("ignoreSslError", false, "ignore validation of SSL certificate")
 	connectionTimeout = flag.Int("connectionTimeout", 60, "connection timeout in seconds")
-	singleCollection  = flag.String("collection", "", "force sync of a single collection")
+	syncUsers         = flag.Bool("syncUsers", true, "enable synching of users")
+	batchSize         = flag.Int("batchSize", 2500, "mongodb source database batch size")
+	prefetch          = flag.Float64("prefetch", 0.5, "mongodb source database prefetch factor")
 )
 
 var logger log4go.Logger
@@ -53,6 +68,7 @@ const (
 )
 
 func main() {
+	flag.Var(&collections, "collection", "limit sync to a collection (can be used multiple times)")
 	flag.Parse()
 	logger = initLogger()
 
@@ -67,7 +83,7 @@ func main() {
 		*forceIndexBuild = "bg"
 	case "fg", "foreground":
 		*forceIndexBuild = "fg"
-	case "immediate":
+	case "im", "immediate":
 		*forceIndexBuild = "im"
 	case "":
 		*forceIndexBuild = ""
@@ -140,14 +156,14 @@ func main() {
 				logger.Info("Copying db " + d)
 				target.DB(d)
 
-				if err := target.Sync(source, srcURI, d, ""); err != nil {
+				if err := target.Sync(source, srcURI, d); err != nil {
 					Quit(1, err)
 				}
 			}
 
 		} else {
 			// copying one database
-			if err := target.Sync(source, srcURI, srcDB, *singleCollection); err != nil {
+			if err := target.Sync(source, srcURI, srcDB); err != nil {
 				Quit(1, err)
 			}
 		}
